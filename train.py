@@ -4,8 +4,9 @@ import torch.autograd as autograd
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from numpy.random import shuffle
 
-from data import POSdata
+from data import POSdata, TorchData
 from models import SequenceTagger
 
 from text_classifier_torch.t2i import T2I as text_vectorizer
@@ -21,86 +22,119 @@ def predictions2text(predictions,label_vectorizer):
     return text_labels
 
 
-def accuracy(data,model,label_vectorizer,targets):
+def accuracy(data,model,label_vectorizer,targets,args,sentences,verbose=False):
     correct=0
     total=0
-    predictions=predictions2text(model(data),label_vectorizer)
-    for psent,sent in zip(predictions,targets):
-        for ptoken,token in zip(psent,sent):
-            if token=="__PADDING__":
-                break
-            if token==ptoken:
-                correct+=1
-            total+=1
+    _word_in,_char_in=data
+    number_of_batches=_word_in.size(1)
+    for batch_id in range(number_of_batches):
+        word_batch=autograd.Variable(_word_in[:,batch_id,:])
+        char_batch=autograd.Variable(_char_in[:,batch_id,:])
+        if args.cuda:
+            word_batch=word_batch.cuda()
+            char_batch=char_batch.cuda()
+        model.eval()
+        predictions=predictions2text(model(word_batch,char_batch),label_vectorizer)
+        target_batch=targets[batch_id*args.batch_size:batch_id*args.batch_size+args.batch_size]
+        sentence_batch=sentences[batch_id*args.batch_size:batch_id*args.batch_size+args.batch_size]
+        for psent,sent,sentence in zip(predictions,target_batch,sentence_batch):
+            if verbose:
+                print("PRED:",psent)
+                print("GOLD:",sent)
+                print("INPUT:",sentence,"\n")
+            for ptoken,token in zip(psent,sent):
+                if token=="<START>" or token=="<END>":
+                    continue
+                if token=="__PADDING__":
+                    break
+                if token==ptoken:
+                    correct+=1
+                total+=1
     return correct/total*100 if total!= 0 else 0
 
-    
+def minibatched_3dim(data,batch_size):
+    seq_count,word_count,char_count=data.size()
+    seq_count_mbatch_aligned=(seq_count//batch_size)*batch_size
+    data_batched=data[:seq_count_mbatch_aligned].transpose(0,1).contiguous().view(word_count,seq_count//batch_size,-1,char_count)
+    return data_batched
+
 
 def train(args):
 
     # data
     posdata=POSdata()
-    train_sentences,train_labels_text=posdata.read_data(args.train_file,args.max_train)
-    print(train_sentences[0],train_labels_text[0])
-    print(len(train_sentences),len(train_labels_text))
-    
-    vectorizer_data=text_vectorizer()
-    vectorizer_labels=text_vectorizer(with_unknown=None)
-    
-    train_data=vectorizer_data(train_sentences)
-    train_labels=vectorizer_labels(train_labels_text)
-    print(train_data[0],train_labels[0])
-    print(len(train_data),len(train_labels))
+    train_sentences,train_labels=posdata.read_data(args.train_file, args.max_train, count_words=True)
+    train_sentences=posdata.mask_rare_words(train_sentences, freq=args.word_freq_cutoff, mask_term="__UNK__", verbose=args.verbose)
 
-    train_batches=torch_minibatched_2dim(to_torch_long_tensor(train_data,args.max_seq_len),args.batch_size)
-    label_batches=torch_minibatched_2dim(to_torch_long_tensor(train_labels,args.max_seq_len),args.batch_size)
-    print("Train sizes:",train_batches.size(),label_batches.size())
-
-    devel_sentences,devel_labels_text=posdata.read_data(args.devel_file,args.max_devel)
-    devel_batches=torch_minibatched_2dim(to_torch_long_tensor(vectorizer_data(devel_sentences),args.max_seq_len),args.batch_size)
-    devel_labels=torch_minibatched_2dim(to_torch_long_tensor(vectorizer_labels(devel_labels_text),args.max_seq_len),args.batch_size)
-    print("Devel sizes:",devel_batches.size(),devel_labels.size())
+    torchdata=TorchData() # class to turn text into torch style minibatches
     
-    devel_batches=autograd.Variable(devel_batches[:,0,:])
+    train_batches_word, train_batches_char, train_batches_label=torchdata.prepare_torch_data(train_sentences, train_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=True, shuffle=args.shuffle_train) # sentences, labels, batch_size, seq_words, seq_chars, train=True, shuffle=False
+
+    print("Train word input sizes:",train_batches_word.size())
+    print("Train character input sizes:",train_batches_char.size())
+    print("Train target sizes:",train_batches_label.size())
+    print("Training examples:",len(train_sentences),"Unique words:",len(torchdata.word_vectorizer.idict),"Unique characters:",len(torchdata.char_vectorizer.idict),"Classes:",len(torchdata.label_vectorizer.idict))
+
+    devel_sentences,devel_labels=posdata.read_data(args.devel_file,args.max_devel)
+
+
+
+    devel_batches_word, devel_batches_char, devel_batches_label=torchdata.prepare_torch_data(devel_sentences, devel_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=False, shuffle=False)
+
+    print("Devel word input sizes:",devel_batches_word.size())
+    print("Devel character input sizes:",devel_batches_char.size())
+    print("Devel target sizes:",devel_batches_label.size())
 
     # model
-    model=SequenceTagger(args.word_embedding_size, args.recurrent_size, args.encoder_layers, len(vectorizer_data.idict),len(vectorizer_labels.idict))
+    model=SequenceTagger(len(torchdata.word_vectorizer.idict),len(torchdata.char_vectorizer.idict),len(torchdata.label_vectorizer.idict),args)
 
     if args.cuda:
         model.cuda()
-        devel_batches=devel_batches.cuda()
 
     # now we can start training
     loss_function=nn.CrossEntropyLoss()
-    optimizer=optim.SGD(model.parameters(),lr=1)
+    optimizer=optim.SGD(model.parameters(),lr=args.learning_rate)
 
-    number_of_batches=train_batches.size(1)
-
-#    predictions_before=model(devel_batches)
+    number_of_batches=train_batches_word.size(1)
     
     
     print("Training batches",number_of_batches)
+    print("Shuffling training data:",args.shuffle_train)
 
     for epoch in range(args.epochs):
         if epoch is not 0:
-            print("EPOCH:",epoch, "LOSS:",loss.data[0], "ACCURACY:",accuracy(devel_batches,model,vectorizer_labels,devel_labels_text[:args.batch_size]))
+            print("EPOCH:",epoch, "LOSS:",loss.data[0], "ACCURACY:",accuracy((devel_batches_word,devel_batches_char),model,torchdata.label_vectorizer,devel_labels,args,devel_sentences,args.verbose))
+
+#        # shuffle batches
+#        idxs=[i for i in range(number_of_batches)]
+#        shuffle(idxs)
+
+
+        # shuffle training data (...and create new batches)
+        if args.shuffle_train:
+            train_batches_word, train_batches_char, train_batches_label=torchdata.prepare_torch_data(train_sentences, train_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=True, shuffle=True)
+
 
         for batch_id in range(number_of_batches):
-            #print("BATCH:",batch_id)
 
-            batch=autograd.Variable(train_batches[:,batch_id,:])
-            targets=autograd.Variable(label_batches[:,batch_id,:])
+            word_batch=autograd.Variable(train_batches_word[:,batch_id,:])
+            char_batch=autograd.Variable(train_batches_char[:,batch_id,:])
+            targets=autograd.Variable(train_batches_label[:,batch_id,:])
     
             if args.cuda:
-                batch=batch.cuda()
+                word_batch=word_batch.cuda()
+                char_batch=char_batch.cuda()
                 targets=targets.cuda()
 
             optimizer.zero_grad()
-            outputs=model(batch)
+            model.train()
+            outputs=model(word_batch,char_batch)
+
             loss=loss_function(outputs.contiguous().view(outputs.size(0)*outputs.size(1),-1), targets.contiguous().view(outputs.size(0)*outputs.size(1)))
+
             loss.backward()
             optimizer.step()
-#            print("LOSS:",loss)
+
 
 
 if __name__=="__main__":
@@ -117,10 +151,17 @@ if __name__=="__main__":
     g.add_argument('--cpu', dest='cuda', default=True, action="store_false", help='Use cpu.')
     g.add_argument('--batch_size', type=int, default=64, help='Minibatch size')
     g.add_argument('--word_embedding_size', type=int, default=200, help='Size of word embeddings')
+    g.add_argument('--char_embedding_size', type=int, default=200, help='Size of word embeddings')
     g.add_argument('--recurrent_size', type=int, default=500, help='Size of recurrent layers')
     g.add_argument('--encoder_layers', type=int, default=2, help='Number of recurrent layer in the endocer')
-    g.add_argument('--max_seq_len', type=int, default=100, help='Max sequence len')
+    g.add_argument('--recurrent_dropout', type=float, default=0.0, help='Dropout in the recurrent layers')
+    g.add_argument('--max_seq_len', type=int, default=100, help='Max sentence len (words in sentence)')
+    g.add_argument('--max_seq_len_char', type=int, default=30, help='Max word len (characters in word)')
+    g.add_argument('--learning_rate', type=float, default=1.0, help='Learning rate')
+    g.add_argument('--shuffle_train', default=False, action='store_true', help='Shuffle training data between epochs')
+    g.add_argument('--word_freq_cutoff', type=int, default=5, help='Cutoff frequency for words, use unknown in training if less than this')
     g.add_argument('--epochs', type=int, default=100, help='Number of epochs.')
+    g.add_argument('--verbose', default=False, action='store_true', help='Verbose prints during training')
     
     args = parser.parse_args()
 
