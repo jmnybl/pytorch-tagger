@@ -75,25 +75,23 @@ def train(args):
     print("Train target sizes:",train_batches_label.size())
     print("Training examples:",len(train_sentences),"Unique words:",len(torchdata.word_vectorizer.idict),"Unique characters:",len(torchdata.char_vectorizer.idict),"Classes:",len(torchdata.label_vectorizer.idict))
 
-    devel_sentences,devel_labels=posdata.read_data(args.devel_file,args.max_devel)
+    
 
-
-
-    devel_batches_word, devel_batches_char, devel_batches_label=torchdata.prepare_torch_data(devel_sentences, devel_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=False, shuffle=False)
-
-    print("Devel word input sizes:",devel_batches_word.size())
-    print("Devel character input sizes:",devel_batches_char.size())
-    print("Devel target sizes:",devel_batches_label.size())
+    vocabulary_size=torchdata.calculate_vocabulary_size(args) # expand the vocabulary from pretrained embeddings if needed
+    print("Expanded word vocabulary size:", vocabulary_size)
 
     # model
-    model=SequenceTagger(len(torchdata.word_vectorizer.idict),len(torchdata.char_vectorizer.idict),len(torchdata.label_vectorizer.idict),args)
+    model=SequenceTagger(vocabulary_size,len(torchdata.char_vectorizer.idict),len(torchdata.label_vectorizer.idict),args)
+
+    if len(args.pretrained_word_embeddings)>0:
+        torchdata.load_pretrained_embeddings(args.pretrained_word_embeddings, torchdata.word_vectorizer, model, model.word_embeddings)
 
     if args.cuda:
         model.cuda()
-
-    # now we can start training
+    
     loss_function=nn.CrossEntropyLoss()
-    optimizer=optim.SGD(model.parameters(),lr=args.learning_rate)
+#    optimizer=optim.SGD(model.parameters(),lr=args.learning_rate)
+    optimizer=optim.Adam(model.parameters(),lr=args.learning_rate)
 
     number_of_batches=train_batches_word.size(1)
     
@@ -101,9 +99,20 @@ def train(args):
     print("Training batches",number_of_batches)
     print("Shuffling training data:",args.shuffle_train)
 
+    # devel data
+    devel_sentences,devel_labels=posdata.read_data(args.devel_file,args.max_devel)
+
+    devel_batches_word, devel_batches_char, devel_batches_label=torchdata.prepare_torch_data(devel_sentences, devel_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=False, shuffle=False)
+
+    print("Devel word input sizes:",devel_batches_word.size())
+    print("Devel character input sizes:",devel_batches_char.size())
+    print("Devel target sizes:",devel_batches_label.size())
+
+    # now we can start training
     for epoch in range(args.epochs):
         if epoch is not 0:
-            print("EPOCH:",epoch, "LOSS:",loss.data[0], "ACCURACY:",accuracy((devel_batches_word,devel_batches_char),model,torchdata.label_vectorizer,devel_labels,args,devel_sentences,args.verbose))
+            acc=accuracy((devel_batches_word, devel_batches_char), model, torchdata.label_vectorizer, devel_labels, args, devel_sentences, args.verbose)
+            print("EPOCH:", epoch, "LOSS:", loss.data[0], "ACCURACY:", acc, flush=True)
 
 #        # shuffle batches
 #        idxs=[i for i in range(number_of_batches)]
@@ -134,7 +143,23 @@ def train(args):
 
             loss.backward()
             optimizer.step()
+    return acc
 
+def callable(inputs):
+    # inputs is a list of hyperparameters (batch_size, word_embedding_size, char_embedding_size, recurrent_size, recurrent_dropout, learning_rate)
+    # returns final accuracy
+
+    from collections import namedtuple
+    Arguments = namedtuple('Arguments', ['train_file', 'devel_file', 'max_train', 'max_devel', 'cuda', 'verbose', 'shuffle_train', 'epochs', 'encoder_layers', 'max_seq_len', 'max_seq_len_char', 'word_freq_cutoff', 'pretrained_word_embeddings', 'batch_size', 'word_embedding_size', 'char_embedding_size', 'recurrent_size', 'recurrent_dropout', 'learning_rate'])
+
+    args=Arguments("../UD_Finnish/fi-ud-train.conllu", "../UD_Finnish/fi-ud-dev.conllu", 1000000, 1000000, True, False, True, 10, 2, 50, 20, 5, "", int(inputs[0])**2, int(inputs[1])*100, int(inputs[2])*100, int(inputs[3])*100, float(inputs[4])/10, float(inputs[5])/10000)
+
+    print(args)
+
+    accuracy=train(args)
+
+    return accuracy*-1
+    
 
 
 if __name__=="__main__":
@@ -159,10 +184,11 @@ if __name__=="__main__":
     g.add_argument('--max_seq_len_char', type=int, default=30, help='Max word len (characters in word)')
     g.add_argument('--learning_rate', type=float, default=1.0, help='Learning rate')
     g.add_argument('--shuffle_train', default=False, action='store_true', help='Shuffle training data between epochs')
-    g.add_argument('--word_freq_cutoff', type=int, default=5, help='Cutoff frequency for words, use unknown in training if less than this')
+    g.add_argument('--word_freq_cutoff', type=int, default=2, help='Cutoff frequency for words, use unknown in training if less than this')
     g.add_argument('--epochs', type=int, default=100, help='Number of epochs.')
+    g.add_argument('--pretrained_word_embeddings', type=str, default="", help='Pretrained word embeddings file (.bin or .vectors)')
     g.add_argument('--verbose', default=False, action='store_true', help='Verbose prints during training')
     
     args = parser.parse_args()
 
-    train(args)
+    accuracy=train(args)

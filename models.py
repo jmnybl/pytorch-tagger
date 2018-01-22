@@ -9,7 +9,7 @@ class SequenceTagger(nn.Module):
         super(SequenceTagger, self).__init__()
         self.recurrent_dim=args.recurrent_size
         self.char_embeddings=nn.Embedding(char_vocab_size, args.char_embedding_size, padding_idx=0)
-        self.word_embeddings=nn.Embedding(word_vocab_size, args.word_embedding_size, sparse=True, padding_idx=0)
+        self.word_embeddings=nn.Embedding(word_vocab_size, args.word_embedding_size, padding_idx=0) # sparse=True
 
         self.char_lstm=nn.LSTM(args.char_embedding_size, int(args.word_embedding_size/2), bidirectional=True, num_layers=1)
 
