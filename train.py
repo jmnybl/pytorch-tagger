@@ -1,10 +1,12 @@
 import sys
+import os
 import torch
 import torch.autograd as autograd
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from numpy.random import shuffle
+import pickle
 
 from data import POSdata, TorchData
 from models import SequenceTagger
@@ -12,6 +14,8 @@ from models import SequenceTagger
 from text_classifier_torch.t2i import T2I as text_vectorizer
 from text_classifier_torch.t2i import to_torch_long_tensor,torch_minibatched_2dim
 
+WARNING='\033[91m'
+END_WARNING='\033[0m'
 
 def predictions2text(predictions,label_vectorizer):
     text_labels=[]
@@ -143,7 +147,24 @@ def train(args):
 
             loss.backward()
             optimizer.step()
+    acc=accuracy((devel_batches_word, devel_batches_char), model, torchdata.label_vectorizer, devel_labels, args, devel_sentences, args.verbose)
+    print("EPOCH:", epoch, "LOSS:", loss.data[0], "ACCURACY:", acc, flush=True)
+
+    if len(args.save_directory)>0:
+        print("Saving model into",args.save_directory)
+
+        if not os.path.exists(args.save_directory):
+            os.makedirs(args.save_directory)
+        print("Model:",os.path.join(args.save_directory,"model.pt"))
+        torch.save(model, os.path.join(args.save_directory,"model.pt"))
+        print("Vectorizers:",os.path.join(args.save_directory,"torchdata_vectorizers.pkl"))
+        with open(os.path.join(args.save_directory,"torchdata_vectorizers.pkl"),"wb") as f:
+            pickle.dump(torchdata,f)
+        print("Saving ready.")
+        
     return acc
+
+
 
 def callable(inputs):
     # inputs is a list of hyperparameters (batch_size, word_embedding_size, char_embedding_size, recurrent_size, recurrent_dropout, learning_rate)
@@ -158,7 +179,7 @@ def callable(inputs):
 
     accuracy=train(args)
 
-    return accuracy*-1
+    return 100-accuracy
     
 
 
@@ -188,7 +209,13 @@ if __name__=="__main__":
     g.add_argument('--epochs', type=int, default=100, help='Number of epochs.')
     g.add_argument('--pretrained_word_embeddings', type=str, default="", help='Pretrained word embeddings file (.bin or .vectors)')
     g.add_argument('--verbose', default=False, action='store_true', help='Verbose prints during training')
+    g.add_argument('--save_directory', type=str, default="", help='Directory to save the model and vectorizers. Model will be .pt file and vectorizer .pkl files. Default="" --> do not save.')
     
     args = parser.parse_args()
+
+    if len(args.save_directory)==0:
+        print(WARNING, "Warning! Model will not be saved, use --save_directory argument to save the model into a directory.", END_WARNING)
+    if os.path.exists(args.save_directory):
+        print(WARNING, "Warning! Model saving directory already exists, old files may be overwritten when the training ends.", END_WARNING)
 
     accuracy=train(args)

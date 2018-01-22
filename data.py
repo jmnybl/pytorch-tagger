@@ -5,6 +5,8 @@ from numpy.random import shuffle
 from text_classifier_torch.t2i import T2I as text_vectorizer
 from text_classifier_torch.t2i import to_torch_long_tensor,torch_minibatched_2dim
 
+WARNING='\033[91m'
+END_WARNING='\033[0m'
 
 ID,FORM,LEMMA,UPOS,POS,FEAT,HEAD,DEPREL,DEPS,MISC=range(10)
 class POSdata(object):
@@ -50,7 +52,7 @@ class POSdata(object):
 
     def mask_rare_words(self, sentences, freq=5, mask_term="__UNK__",verbose=False):
         if self.word_counts==None:
-            print("Cannot mask because we don't have word_counts.")
+            print(WARNING, "Warning! Cannot mask because we don't have word_counts. Use count_words=True when reading data.", END_WARNING, file=sys.stderr)
             return
         masked_sentences=[]
         for sent in sentences:
@@ -120,7 +122,7 @@ class TorchData(object):
             try:
                 import lwvlib
             except:
-                print("Warning! Could not import lwvlib, pretrained embeddings cannot be loaded.",file=sys.stderr)
+                print(WARNING, "Warning! Could not import lwvlib, pretrained embeddings cannot be loaded.", END_WARNING, file=sys.stderr)
                 return len(self.word_vectorizer.idict)
             self.pretrained_embedding_model=lwvlib.load(args.pretrained_word_embeddings, max_rank_mem=500000, max_rank=500000) # TODO
             # expand the vectorizer dictionary based on words in our model
@@ -132,7 +134,7 @@ class TorchData(object):
         try:
             import lwvlib
         except:
-            print("Warning! Could not import lwvlib, pretrained embeddings not loaded.",file=sys.stderr)
+            print(WARNING, "Warning! Could not import lwvlib, pretrained embeddings not loaded.", END_WARNING, file=sys.stderr)
             return
 
         # Initialize with pretrained embeddings
@@ -141,11 +143,11 @@ class TorchData(object):
         pretrained = {}
         emb_invalid = 0
         if not self.pretrained_embedding_model:
-            print("Warning! Most likely will load pretrained weights only for words present in the training data. Try calling calculate_vocabulary_size() before initializing the nn model.",file=sys.stderr)
+            print(WARNING, "Warning! Most likely will load pretrained weights only for words present in the training data. Try calling calculate_vocabulary_size() before initializing the nn model.", END_WARNING, file=sys.stderr)
             self.pretrained_embedding_model=lwvlib.load(embedding_file, max_rank_mem=500000, max_rank=500000) # TODO
 
         if new_weights.size(1)!=self.pretrained_embedding_model.vectors.shape[1]:
-            print("Warning! Dimensionality mismatch,", new_weights.size(1), "vs", self.pretrained_embedding_model.vectors.shape[0]  ,", pretrained embeddings cannot be loaded.",file=sys.stderr)
+            print(WARNING, "Warning! Dimensionality mismatch,", new_weights.size(1), "vs", self.pretrained_embedding_model.vectors.shape[0]  ,", pretrained embeddings cannot be loaded.", END_WARNING, file=sys.stderr)
             return
 
         found=0
