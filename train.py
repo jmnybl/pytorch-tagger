@@ -81,21 +81,24 @@ def train(args):
 
     
 
-    vocabulary_size=torchdata.calculate_vocabulary_size(args) # expand the vocabulary from pretrained embeddings if needed
-    print("Expanded word vocabulary size:", vocabulary_size)
+    pretrained_dim, vocabulary_size=torchdata.expand_vocabulary_from_pretrained(args) # expand the vocabulary from pretrained embeddings if needed
+    print("Expanded word vocabulary size:", vocabulary_size, "Size of pretrained embeddings:", pretrained_dim)
 
     # model
-    model=SequenceTagger(vocabulary_size,len(torchdata.char_vectorizer.idict),len(torchdata.label_vectorizer.idict),args)
+    model=SequenceTagger(vocabulary_size, len(torchdata.char_vectorizer.idict), len(torchdata.label_vectorizer.idict), args, pretrained_size=pretrained_dim)
 
     if len(args.pretrained_word_embeddings)>0:
-        torchdata.load_pretrained_embeddings(args.pretrained_word_embeddings, torchdata.word_vectorizer, model, model.word_embeddings)
+        torchdata.load_pretrained_embeddings(args.pretrained_word_embeddings, torchdata.word_vectorizer, model, model.pretrained_word_embeddings)
 
     if args.cuda:
         model.cuda()
     
+    # remove frozen parameters
+    trainable_parameters = filter(lambda p: p.requires_grad, model.parameters())
+
     loss_function=nn.CrossEntropyLoss()
 #    optimizer=optim.SGD(model.parameters(),lr=args.learning_rate)
-    optimizer=optim.Adam(model.parameters(),lr=args.learning_rate)
+    optimizer=optim.Adam(trainable_parameters,lr=args.learning_rate)
 
     number_of_batches=train_batches_word.size(1)
     
@@ -192,13 +195,14 @@ if __name__=="__main__":
     
     g.add_argument('--train_file', type=str, help='Input training file name')
     g.add_argument('--devel_file', type=str, help='Input development file name')
-    g.add_argument('--max_train', type=int, default=5000, help='Maximum number of sentences used in training')
-    g.add_argument('--max_devel', type=int, default=100, help='Maximum number of sentences used in training')
+    g.add_argument('--max_train', type=int, default=1000000, help='Maximum number of sentences used in training')
+    g.add_argument('--max_devel', type=int, default=1000000, help='Maximum number of sentences used in training eval')
     g.add_argument('--cpu', dest='cuda', default=True, action="store_false", help='Use cpu.')
     g.add_argument('--batch_size', type=int, default=64, help='Minibatch size')
     g.add_argument('--word_embedding_size', type=int, default=200, help='Size of word embeddings')
     g.add_argument('--char_embedding_size', type=int, default=200, help='Size of word embeddings')
     g.add_argument('--recurrent_size', type=int, default=500, help='Size of recurrent layers')
+    g.add_argument('--char_recurrent_size', type=int, default=300, help='Size of recurrent layers in character rnn')
     g.add_argument('--encoder_layers', type=int, default=2, help='Number of recurrent layer in the endocer')
     g.add_argument('--recurrent_dropout', type=float, default=0.0, help='Dropout in the recurrent layers')
     g.add_argument('--max_seq_len', type=int, default=100, help='Max sentence len (words in sentence)')

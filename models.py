@@ -5,17 +5,27 @@ import torch.nn.functional as F
 
 class SequenceTagger(nn.Module):
 
-    def __init__(self, word_vocab_size, char_vocab_size, tagset_size, args):
+    def __init__(self, word_vocab_size, char_vocab_size, tagset_size, args, pretrained_size=None):
         super(SequenceTagger, self).__init__()
         self.recurrent_dim=args.recurrent_size
         self.char_embeddings=nn.Embedding(char_vocab_size, args.char_embedding_size, padding_idx=0)
         self.word_embeddings=nn.Embedding(word_vocab_size, args.word_embedding_size, padding_idx=0) # sparse=True
 
-        self.char_lstm=nn.LSTM(args.char_embedding_size, int(args.word_embedding_size/2), bidirectional=True, num_layers=1)
+        recurrent_input_dim=args.word_embedding_size+args.char_recurrent_size*2 # *2 because of bidirectional
+
+        if len(args.pretrained_word_embeddings)>0:
+            self.pretrained_word_embeddings=nn.Embedding(word_vocab_size, pretrained_size, padding_idx=0)
+            self.pretrained_word_embeddings.weight.requires_grad = False
+            recurrent_input_dim+=pretrained_size
+        else:
+            self.pretrained_word_embeddings=None
+
+        self.char_lstm=nn.LSTM(args.char_embedding_size, args.char_recurrent_size, bidirectional=True, num_layers=1, dropout=args.recurrent_dropout)
 
 #        self.chars2word_lstm=nn.LSTM(input_size=self.char_lstm.hidden_size*self.char_lstm.num_layers*2, hidden_size=args.recurrent_dim, num_layers=1, bidirectional=True)
 
-        self.recurrent=nn.LSTM(args.word_embedding_size, self.recurrent_dim, bidirectional=True, num_layers=args.encoder_layers, dropout=args.recurrent_dropout)
+
+        self.recurrent=nn.LSTM(recurrent_input_dim, self.recurrent_dim, bidirectional=True, num_layers=args.encoder_layers, dropout=args.recurrent_dropout)
 
         self.linear=nn.Linear(self.recurrent_dim*2, tagset_size)
 
@@ -32,9 +42,15 @@ class SequenceTagger(nn.Module):
 
         _word_embeddings=self.word_embeddings(word_batch_seq)
 
-        chr_h_n_wrd_input_sum=(chr_h_n_wrd_input+_word_embeddings)/2
+        if self.pretrained_word_embeddings:
+            _pretrained_word_embeddings=self.pretrained_word_embeddings(word_batch_seq)
+            chr_h_n_wrd_input_concat=torch.cat((_pretrained_word_embeddings, _word_embeddings, chr_h_n_wrd_input), dim=2)
+        else:
+            chr_h_n_wrd_input_concat=torch.cat((_word_embeddings, chr_h_n_wrd_input), dim=2)
 
-        recurrent_out, self.hidden=self.recurrent(chr_h_n_wrd_input_sum.view(len(word_batch_seq), word_batch_seq.size(1), -1))
+#        chr_h_n_wrd_input_sum=(chr_h_n_wrd_input+_word_embeddings)/2
+
+        recurrent_out, self.hidden=self.recurrent(chr_h_n_wrd_input_concat.view(len(word_batch_seq), word_batch_seq.size(1), -1))
         linear_out=self.linear(recurrent_out.view(len(word_batch_seq),word_batch_seq.size(1),-1))
 
 #        softmax_out=F.log_softmax(linear_out,dim=2) # or log_softmax

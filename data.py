@@ -113,21 +113,21 @@ class TorchData(object):
 
         return batches_word, batches_char, batches_label
 
-    def calculate_vocabulary_size(self, args):
+    def expand_vocabulary_from_pretrained(self, args, expand=100000):
 
         if len(args.pretrained_word_embeddings)==0:
-            return len(self.word_vectorizer.idict)
+            return None, len(self.word_vectorizer.idict)
 
         else: # we will load pretrained word embeddings if possible, vocabulary will be (current | words from vector model)
             try:
                 import lwvlib
             except:
                 print(WARNING, "Warning! Could not import lwvlib, pretrained embeddings cannot be loaded.", END_WARNING, file=sys.stderr)
-                return len(self.word_vectorizer.idict)
+                return None, len(self.word_vectorizer.idict)
             self.pretrained_embedding_model=lwvlib.load(args.pretrained_word_embeddings, max_rank_mem=500000, max_rank=500000) # TODO
             # expand the vectorizer dictionary based on words in our model
-            _=self.word_vectorizer(self.pretrained_embedding_model.words[:100000],train=True)
-            return len(self.word_vectorizer.idict)
+            _=self.word_vectorizer(self.pretrained_embedding_model.words[:expand],train=True)
+            return self.pretrained_embedding_model.vectors.shape[1], len(self.word_vectorizer.idict)
 
     def load_pretrained_embeddings(self, embedding_file, vectorizer, model, model_word_embeddings):
         # vectorizer has token to index dictionary
@@ -146,9 +146,9 @@ class TorchData(object):
             print(WARNING, "Warning! Most likely will load pretrained weights only for words present in the training data. Try calling calculate_vocabulary_size() before initializing the nn model.", END_WARNING, file=sys.stderr)
             self.pretrained_embedding_model=lwvlib.load(embedding_file, max_rank_mem=500000, max_rank=500000) # TODO
 
-        if new_weights.size(1)!=self.pretrained_embedding_model.vectors.shape[1]:
-            print(WARNING, "Warning! Dimensionality mismatch,", new_weights.size(1), "vs", self.pretrained_embedding_model.vectors.shape[0]  ,", pretrained embeddings cannot be loaded.", END_WARNING, file=sys.stderr)
-            return
+#        if new_weights.size(1)!=self.pretrained_embedding_model.vectors.shape[1]:
+#            print(WARNING, "Warning! Dimensionality mismatch,", new_weights.size(1), "vs", self.pretrained_embedding_model.vectors.shape[1]  ,", pretrained embeddings cannot be loaded.", END_WARNING, file=sys.stderr)
+#            return
 
         found=0
         not_found=0
