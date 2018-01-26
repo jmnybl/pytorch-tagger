@@ -5,7 +5,7 @@ import torch.autograd as autograd
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from numpy.random import shuffle
+import numpy as np
 import pickle
 
 from data import POSdata, TorchData
@@ -19,7 +19,10 @@ END_WARNING='\033[0m'
 
 def predictions2text(predictions,label_vectorizer):
     text_labels=[]
-    scores,predictions_=predictions.max(2)
+    # unpack because predictions is packed sequence
+    data, lens = torch.nn.utils.rnn.pad_packed_sequence(predictions)  # unpack
+#    print("*******",data.size())
+    scores,predictions_=data.max(2)
     for pred in torch.transpose(predictions_,0,1):
         max_labels=[label_vectorizer.reverse(int(i)) for i in pred.data.cpu().numpy()]
         text_labels.append(max_labels)
@@ -29,16 +32,17 @@ def predictions2text(predictions,label_vectorizer):
 def accuracy(data,model,label_vectorizer,targets,args,sentences,verbose=False):
     correct=0
     total=0
-    _word_in,_char_in=data
+    _word_in,_char_in,_lengths=data
     number_of_batches=_word_in.size(1)
     for batch_id in range(number_of_batches):
         word_batch=autograd.Variable(_word_in[:,batch_id,:])
         char_batch=autograd.Variable(_char_in[:,batch_id,:])
+        len_batch=torch.LongTensor(_lengths[batch_id*args.batch_size:batch_id*args.batch_size+args.batch_size])
         if args.cuda:
             word_batch=word_batch.cuda()
             char_batch=char_batch.cuda()
         model.eval()
-        predictions=predictions2text(model(word_batch,char_batch),label_vectorizer)
+        predictions=predictions2text(model(word_batch,char_batch,len_batch),label_vectorizer)
         target_batch=targets[batch_id*args.batch_size:batch_id*args.batch_size+args.batch_size]
         sentence_batch=sentences[batch_id*args.batch_size:batch_id*args.batch_size+args.batch_size]
         for psent,sent,sentence in zip(predictions,target_batch,sentence_batch):
@@ -66,13 +70,15 @@ def minibatched_3dim(data,batch_size):
 def train(args):
 
     # data
-    posdata=POSdata()
-    train_sentences,train_labels=posdata.read_data(args.train_file, args.max_train, count_words=True)
-    train_sentences=posdata.mask_rare_words(train_sentences, freq=args.word_freq_cutoff, mask_term="__UNK__", verbose=args.verbose)
+    posdata=POSdata() # class to read part-of-speech tagging data from conllu
+    train_sentences,train_labels=posdata.read_data(args.train_file, args.max_train, count_words=False)
+#    train_sentences=posdata.mask_rare_words(train_sentences, freq=args.word_freq_cutoff, mask_term="__UNK__", verbose=args.verbose)
 
     torchdata=TorchData() # class to turn text into torch style minibatches
+    if len(args.pretrained_word_embeddings)>0:
+        torchdata.init_vocab_from_pretrained(args.pretrained_word_embeddings)
     
-    train_batches_word, train_batches_char, train_batches_label=torchdata.prepare_torch_data(train_sentences, train_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=True, shuffle=args.shuffle_train) # sentences, labels, batch_size, seq_words, seq_chars, train=True, shuffle=False
+    train_batches_word, train_batches_char, train_batches_label, train_sequence_lengths, train_sorting_indices, train_unsorting_indices=torchdata.prepare_torch_data(train_sentences, train_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=True, shuffle=args.shuffle_train, sort_batch=True) # sentences, labels, batch_size, seq_words, seq_chars, train=True, shuffle=False, sort_batch=False
 
     print("Train word input sizes:",train_batches_word.size())
     print("Train character input sizes:",train_batches_char.size())
@@ -81,14 +87,12 @@ def train(args):
 
     
 
-    pretrained_dim, vocabulary_size=torchdata.expand_vocabulary_from_pretrained(args) # expand the vocabulary from pretrained embeddings if needed
-    print("Expanded word vocabulary size:", vocabulary_size, "Size of pretrained embeddings:", pretrained_dim)
-
     # model
-    model=SequenceTagger(vocabulary_size, len(torchdata.char_vectorizer.idict), len(torchdata.label_vectorizer.idict), args, pretrained_size=pretrained_dim)
+    model=SequenceTagger(len(torchdata.word_vectorizer.idict), len(torchdata.char_vectorizer.idict), len(torchdata.label_vectorizer.idict), args, pretrained_size=torchdata.embedding_size)
 
+    # copy weights from pretrained embeddings
     if len(args.pretrained_word_embeddings)>0:
-        torchdata.load_pretrained_embeddings(args.pretrained_word_embeddings, torchdata.word_vectorizer, model, model.pretrained_word_embeddings)
+        torchdata.load_pretrained_embeddings(args.pretrained_word_embeddings, model, model.pretrained_word_embeddings)
 
     if args.cuda:
         model.cuda()
@@ -96,9 +100,9 @@ def train(args):
     # remove frozen parameters
     trainable_parameters = filter(lambda p: p.requires_grad, model.parameters())
 
-    loss_function=nn.CrossEntropyLoss()
-#    optimizer=optim.SGD(model.parameters(),lr=args.learning_rate)
-    optimizer=optim.Adam(trainable_parameters,lr=args.learning_rate)
+    loss_function=nn.CrossEntropyLoss()#ignore_index=0)
+    optimizer=optim.SGD(trainable_parameters,lr=args.learning_rate)
+#    optimizer=optim.Adam(trainable_parameters,lr=args.learning_rate)
 
     number_of_batches=train_batches_word.size(1)
     
@@ -109,48 +113,57 @@ def train(args):
     # devel data
     devel_sentences,devel_labels=posdata.read_data(args.devel_file,args.max_devel)
 
-    devel_batches_word, devel_batches_char, devel_batches_label=torchdata.prepare_torch_data(devel_sentences, devel_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=False, shuffle=False)
+    devel_batches_word, devel_batches_char, devel_batches_label, devel_sequence_lengths, devel_sorting_indices, devel_unsorting_indices=torchdata.prepare_torch_data(devel_sentences, devel_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=False, shuffle=False, sort_batch=True)
+    devel_sentences_sorted=list(np.array(devel_sentences)[devel_sorting_indices])
+    devel_labels_sorted=list(np.array(devel_labels)[devel_sorting_indices])
 
     print("Devel word input sizes:",devel_batches_word.size())
     print("Devel character input sizes:",devel_batches_char.size())
     print("Devel target sizes:",devel_batches_label.size())
 
-    # now we can start training
+    # TRAINING
     for epoch in range(args.epochs):
         if epoch is not 0:
-            acc=accuracy((devel_batches_word, devel_batches_char), model, torchdata.label_vectorizer, devel_labels, args, devel_sentences, args.verbose)
+            acc=accuracy((devel_batches_word, devel_batches_char, devel_sequence_lengths), model, torchdata.label_vectorizer, devel_labels_sorted, args, devel_sentences_sorted, args.verbose)
             print("EPOCH:", epoch, "LOSS:", loss.data[0], "ACCURACY:", acc, flush=True)
 
-#        # shuffle batches
-#        idxs=[i for i in range(number_of_batches)]
-#        shuffle(idxs)
+        # shuffle batches
+        idxs=[i for i in range(number_of_batches)]
+        np.random.shuffle(idxs)
 
 
         # shuffle training data (...and create new batches)
         if args.shuffle_train:
-            train_batches_word, train_batches_char, train_batches_label=torchdata.prepare_torch_data(train_sentences, train_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=True, shuffle=True)
+            train_batches_word, train_batches_char, train_batches_label, train_sequence_lengths, train_sorting_indices, train_unsorting_indices=torchdata.prepare_torch_data(train_sentences, train_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=True, shuffle=True, sort_batch=True)
 
 
-        for batch_id in range(number_of_batches):
+#        for batch_id in range(number_of_batches):
+        for batch_id in idxs:
 
             word_batch=autograd.Variable(train_batches_word[:,batch_id,:])
             char_batch=autograd.Variable(train_batches_char[:,batch_id,:])
             targets=autograd.Variable(train_batches_label[:,batch_id,:])
+            lengths=torch.LongTensor(train_sequence_lengths[batch_id*args.batch_size:batch_id*args.batch_size+args.batch_size])
     
             if args.cuda:
                 word_batch=word_batch.cuda()
                 char_batch=char_batch.cuda()
                 targets=targets.cuda()
+                lengths=lengths.cuda()
 
             optimizer.zero_grad()
             model.train()
-            outputs=model(word_batch,char_batch)
+            outputs=model(word_batch, char_batch, lengths)
 
-            loss=loss_function(outputs.contiguous().view(outputs.size(0)*outputs.size(1),-1), targets.contiguous().view(outputs.size(0)*outputs.size(1)))
+            # pack targets
+            targets_packed=torch.nn.utils.rnn.pack_padded_sequence(targets, list(lengths))
+
+#            loss=loss_function(outputs.contiguous().view(outputs.size(0)*outputs.size(1),-1), targets_packed.data.contiguous().view(outputs.size(0)*outputs.size(1)))
+            loss=loss_function(outputs.data, targets_packed.data)
 
             loss.backward()
             optimizer.step()
-    acc=accuracy((devel_batches_word, devel_batches_char), model, torchdata.label_vectorizer, devel_labels, args, devel_sentences, args.verbose)
+    acc=accuracy((devel_batches_word, devel_batches_char, devel_sequence_lengths), model, torchdata.label_vectorizer, devel_labels_sorted, args, devel_sentences_sorted, args.verbose)
     print("EPOCH:", epoch, "LOSS:", loss.data[0], "ACCURACY:", acc, flush=True)
 
     if len(args.save_directory)>0:

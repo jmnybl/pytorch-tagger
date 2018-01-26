@@ -1,6 +1,6 @@
 import sys
 import torch
-from numpy.random import shuffle
+import numpy as np
 
 from text_classifier_torch.t2i import T2I as text_vectorizer
 from text_classifier_torch.t2i import to_torch_long_tensor,torch_minibatched_2dim
@@ -77,11 +77,48 @@ class TorchData(object):
         self.char_vectorizer=text_vectorizer(with_unknown="__UNK__")
         self.label_vectorizer=text_vectorizer(with_unknown=None)
         self.pretrained_embedding_model=None
+        self.vidx=(0,0)
+        self.embedding_size=None
+
+
+    def init_vocab_from_pretrained(self,embedding_file, vocab_size=500000):
+        try:
+            import lwvlib
+        except:
+            print(WARNING, "Warning! Could not import lwvlib, pretrained embeddings cannot be loaded.", END_WARNING, file=sys.stderr)
+            sys.exit()
+        self.pretrained_embedding_model=lwvlib.load(embedding_file, max_rank_mem=500000, max_rank=500000) # TODO
+        pre=len(self.word_vectorizer.idict)
+        # init the vectorizer dictionary based on words in our model
+        _=self.word_vectorizer(self.pretrained_embedding_model.words[:vocab_size],train=True)
+        self.vidx=(pre,vocab_size)
+        self.embedding_size=self.pretrained_embedding_model.vectors.shape[1]
+        print(vocab_size, "word read from embedding model, dimensionality:", self.embedding_size)
+
+     
+    def load_pretrained_embeddings(self, embedding_file, model, model_word_embeddings):
+        # vectorizer has token to index dictionary
+        if self.pretrained_embedding_model is None:
+            print(WARNING, "Cannot load pretrained embeddings, did you call init_vocab_from_pretrained()?", END_WARNING, file=sys.stderr)
+            sys.exit()
+
+        new_weights = np.zeros((len(self.word_vectorizer.idict),self.embedding_size))
+        print("Loading pretrained word embeddings from", embedding_file)
+
+        embeddings=self.pretrained_embedding_model.vectors[:self.vidx[1], :]
+        new_weights[self.vidx[0]:self.vidx[0]+self.vidx[1],:]=embeddings # replace part of the matrix, rest is still zeros
+        model_word_embeddings.weight.data.copy_(torch.from_numpy(new_weights))
+
+        self.pretrained_embedding_model=None # no need for this anymore, free the memory
+
+        return
+
+
 
     def shuffle_two(self,one,two):
 
         three=[(a,b) for a,b in zip(one,two)]
-        shuffle(three)
+        np.random.shuffle(three)
         one=[a for a,b in three]
         two=[b for a,b in three]
         return one, two
@@ -92,7 +129,7 @@ class TorchData(object):
         data_batched=data[:seq_count_mbatch_aligned].transpose(0,1).contiguous().view(word_count,seq_count//batch_size,-1,char_count)
         return data_batched
 
-    def prepare_torch_data(self, sentences, labels, batch_size, seq_words, seq_chars, train=True, shuffle=False):
+    def prepare_torch_data(self, sentences, labels, batch_size, seq_words, seq_chars, train=True, shuffle=False, sort_batch=False):
 
         if shuffle:
             sentences,labels=self.shuffle_two(sentences,labels)
@@ -102,74 +139,39 @@ class TorchData(object):
         data_labels=self.label_vectorizer(labels) # TODO: what if dev/test have labels not present in train?
 
         # torch tensor
-        tdata,_=to_torch_long_tensor(data_words,[seq_words])
+        tdata,tlens=to_torch_long_tensor(data_words,[seq_words])
         cdata,_=to_torch_long_tensor(data_chars,[seq_words, seq_chars])
         ldata,_=to_torch_long_tensor(data_labels,[seq_words])
+        
+        if sort_batch: # sort data inside batches in descending order, TODO: do this in pytorch not numpy, should not sort the whole treebank, just inside minibatches?
+
+            sorting_indices=tlens.numpy().argsort()[::-1] # descending order
+            
+            sorted_tlens_np=tlens.numpy()[sorting_indices]
+            sorted_tdata_np=tdata.numpy()[sorting_indices]
+            sorted_cdata_np=cdata.numpy()[sorting_indices]
+            sorted_ldata_np=ldata.numpy()[sorting_indices]
+
+            tlens=torch.from_numpy(sorted_tlens_np)
+            tdata=torch.from_numpy(sorted_tdata_np)
+            cdata=torch.from_numpy(sorted_cdata_np)
+            ldata=torch.from_numpy(sorted_ldata_np)
+
+            unsorting_indices=sorting_indices.argsort()
+#            original_back=sorted_tlens_np[unsorting_indices]
+#            print("unsorted data:",original_back)
+#            print("original==original.sorted().unsorted():",tlens_np==original_back)
+        else:
+            unsorting_indices=None
             
         # minibatch
         batches_word=torch_minibatched_2dim(tdata,batch_size)
         batches_char=self.minibatched_3dim(cdata,batch_size)
         batches_label=torch_minibatched_2dim(ldata,batch_size)
 
-        return batches_word, batches_char, batches_label
+        return batches_word, batches_char, batches_label, tlens, sorting_indices, unsorting_indices
 
-    def expand_vocabulary_from_pretrained(self, args, expand=100000):
 
-        if len(args.pretrained_word_embeddings)==0:
-            return None, len(self.word_vectorizer.idict)
 
-        else: # we will load pretrained word embeddings if possible, vocabulary will be (current | words from vector model)
-            try:
-                import lwvlib
-            except:
-                print(WARNING, "Warning! Could not import lwvlib, pretrained embeddings cannot be loaded.", END_WARNING, file=sys.stderr)
-                return None, len(self.word_vectorizer.idict)
-            self.pretrained_embedding_model=lwvlib.load(args.pretrained_word_embeddings, max_rank_mem=500000, max_rank=500000) # TODO
-            # expand the vectorizer dictionary based on words in our model
-            _=self.word_vectorizer(self.pretrained_embedding_model.words[:expand],train=True)
-            return self.pretrained_embedding_model.vectors.shape[1], len(self.word_vectorizer.idict)
-
-    def load_pretrained_embeddings(self, embedding_file, vectorizer, model, model_word_embeddings):
-        # vectorizer has token to index dictionary
-        try:
-            import lwvlib
-        except:
-            print(WARNING, "Warning! Could not import lwvlib, pretrained embeddings not loaded.", END_WARNING, file=sys.stderr)
-            return
-
-        # Initialize with pretrained embeddings
-        new_weights = model_word_embeddings.weight.data # copy initialization for unknowns
-        print("Loading pretrained word embeddings from", embedding_file)
-        pretrained = {}
-        emb_invalid = 0
-        if not self.pretrained_embedding_model:
-            print(WARNING, "Warning! Most likely will load pretrained weights only for words present in the training data. Try calling calculate_vocabulary_size() before initializing the nn model.", END_WARNING, file=sys.stderr)
-            self.pretrained_embedding_model=lwvlib.load(embedding_file, max_rank_mem=500000, max_rank=500000) # TODO
-
-#        if new_weights.size(1)!=self.pretrained_embedding_model.vectors.shape[1]:
-#            print(WARNING, "Warning! Dimensionality mismatch,", new_weights.size(1), "vs", self.pretrained_embedding_model.vectors.shape[1]  ,", pretrained embeddings cannot be loaded.", END_WARNING, file=sys.stderr)
-#            return
-
-        found=0
-        not_found=0
-        # copy vectors TODO: very inefficient!
-        for word,idx in vectorizer.idict.items():
-            if word in self.pretrained_embedding_model.words:
-                new_weights[idx] = torch.from_numpy(self.pretrained_embedding_model.vectors[self.pretrained_embedding_model.get(word)])
-                found+=1
-            elif word.lower() in self.pretrained_embedding_model.words:
-                new_weights[idx] = torch.from_numpy(self.pretrained_embedding_model.vectors[self.pretrained_embedding_model.get(word.lower())])
-                found+=1
-            else:
-                not_found+=1
-        # replace weights in model
-        model_word_embeddings.weight = torch.nn.Parameter(new_weights)
-
-        print("Loaded", found, "pretrained embeddings from", embedding_file)
-        print("Embeddings for", not_found, "words not found.")
-
-        self.pretrained_embedding_model=None # no need for this anymore, free the memory
-
-        return
 
 

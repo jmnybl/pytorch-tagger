@@ -32,11 +32,12 @@ class SequenceTagger(nn.Module):
 
 
 
-    def forward(self, word_batch_seq, char_batch_seq):
+    def forward(self, word_batch_seq, char_batch_seq, sequence_lenghts):
 
         wcount,mbatch,ccount=char_batch_seq.size() # word X sentence X character
         _char_lstm_in=char_batch_seq.view(wcount*mbatch,ccount).transpose(0,1).contiguous()
         _char_embeddings=self.char_embeddings(_char_lstm_in)
+
         _,(chr_h_n,_)=self.char_lstm(_char_embeddings)
         chr_h_n_wrd_input=chr_h_n.transpose(0,1).contiguous().view(wcount,mbatch,-1)
 
@@ -50,9 +51,17 @@ class SequenceTagger(nn.Module):
 
 #        chr_h_n_wrd_input_sum=(chr_h_n_wrd_input+_word_embeddings)/2
 
-        recurrent_out, self.hidden=self.recurrent(chr_h_n_wrd_input_concat.view(len(word_batch_seq), word_batch_seq.size(1), -1))
-        linear_out=self.linear(recurrent_out.view(len(word_batch_seq),word_batch_seq.size(1),-1))
+        # pack
+#        print(list(sequence_lenghts))
+#        print("without view:",chr_h_n_wrd_input_concat.size())
+#        print("with view:",chr_h_n_wrd_input_concat.view(len(word_batch_seq), word_batch_seq.size(1), -1).size())
+        chr_h_n_wrd_input_concat_packed=torch.nn.utils.rnn.pack_padded_sequence(chr_h_n_wrd_input_concat, list(sequence_lenghts))
+#        print(chr_h_n_wrd_input_concat_packed)
+        recurrent_out, self.hidden=self.recurrent(chr_h_n_wrd_input_concat_packed)#.view(len(word_batch_seq), word_batch_seq.size(1), -1))
+#        print(recurrent_out)
+        linear_out=self.linear(recurrent_out.data)#.view(len(word_batch_seq),word_batch_seq.size(1),-1))
+        newly_packed = torch.nn.utils.rnn.PackedSequence(linear_out, recurrent_out.batch_sizes)  # create PackedSequence
 
 #        softmax_out=F.log_softmax(linear_out,dim=2) # or log_softmax
 
-        return linear_out
+        return newly_packed

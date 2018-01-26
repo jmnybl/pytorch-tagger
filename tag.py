@@ -5,46 +5,48 @@ import torch.autograd as autograd
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from numpy.random import shuffle
+import numpy as np
 import pickle
 from itertools import zip_longest
 
 from data import POSdata, TorchData
 from models import SequenceTagger
-from train import accuracy
+from train import accuracy, predictions2text
 
 from text_classifier_torch.t2i import T2I as text_vectorizer
 from text_classifier_torch.t2i import to_torch_long_tensor,torch_minibatched_2dim
 
-
 WARNING='\033[91m'
 END_WARNING='\033[0m'
 
-def predictions2text(predictions,label_vectorizer):
-    text_labels=[]
-    scores,predictions_=predictions.max(2)
-    for pred in torch.transpose(predictions_,0,1):
-        max_labels=[label_vectorizer.reverse(int(i)) for i in pred.data.cpu().numpy()]
-        text_labels.append(max_labels)
-    return text_labels
+#def predictions2text(predictions,label_vectorizer):
+#    text_labels=[]
+#    scores,predictions_=predictions.max(2)
+#    for pred in torch.transpose(predictions_,0,1):
+#        max_labels=[label_vectorizer.reverse(int(i)) for i in pred.data.cpu().numpy()]
+#        text_labels.append(max_labels)
+#    return text_labels
 
 ID,FORM,LEMMA,UPOS,POS,FEAT,HEAD,DEPREL,DEPS,MISC=range(10)
 #def predict(data,model,label_vectorizer,targets,args,sentences,verbose=False):
-def predict(input_data, model, label_vectorizer, conllu_sentences):
-    _word_in,_char_in=input_data
+def predict(input_data, model, label_vectorizer, conllu_sentences, sorting, unsorting, args):
+    _word_in,_char_in,_lens=input_data
     number_of_batches=_word_in.size(1)
+    sorted_conllu=list(np.array(conllu_sentences)[sorting]) # sort into same order as nn input data
+    predicted_conllu=[]
     for batch_id in range(number_of_batches):
         word_batch=autograd.Variable(_word_in[:,batch_id,:])
         char_batch=autograd.Variable(_char_in[:,batch_id,:])
+        len_batch=torch.LongTensor(_lens[batch_id*args.batch_size:batch_id*args.batch_size+args.batch_size])
         if args.cuda:
             word_batch=word_batch.cuda()
             char_batch=char_batch.cuda()
         model.eval()
-        predictions=predictions2text(model(word_batch,char_batch),label_vectorizer)
-        conllu_batch=conllu_sentences[batch_id*args.batch_size:batch_id*args.batch_size+args.batch_size]
-        for psent,(comm,conllu) in zip_longest(predictions,conllu_batch,fillvalue=[]): # this is one sequence, i.e. sentence
+        predictions=predictions2text(model(word_batch,char_batch,len_batch),label_vectorizer)
+        conllu_batch=sorted_conllu[batch_id*args.batch_size:batch_id*args.batch_size+args.batch_size]
+#        for psent,(comm,conllu) in zip_longest(predictions,conllu_batch,fillvalue=[]): # this is one sequence, i.e. sentence
+        for psent,(comm,conllu) in zip_longest(predictions,conllu_batch):
             if not conllu:
-                #print
                 break
             sentence=[]
             for i, token in enumerate(conllu):
@@ -53,11 +55,14 @@ def predict(input_data, model, label_vectorizer, conllu_sentences):
                     ptoken="_"
                 token[UPOS]=ptoken
                 sentence.append(token)
-            for c in comm:
-                print(c)
-            for token in sentence:
-                print("\t".join(t for t in token))
-            print("")
+            predicted_conllu.append((comm,sentence))
+    unsorted_conllu=list(np.array(predicted_conllu)[unsorting])
+    for comm, sentence in unsorted_conllu:
+        for c in comm:
+            print(c)
+        for token in sentence:
+            print("\t".join(t for t in token))
+        print("")
 
 
 
@@ -74,7 +79,7 @@ def predict_eval(args):
         torchdata=pickle.load(f) # class to turn text into torch style minibatches
     
     # TODO: max sequence lengths? Should collect from the data?
-    data_batches_word, data_batches_char, data_batches_label=torchdata.prepare_torch_data(input_sentences, input_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=False, shuffle=False) # sentences, labels, batch_size, seq_words, seq_chars, train=True, shuffle=False
+    data_batches_word, data_batches_char, data_batches_label, sequence_lengths, sorting_indices, unsorting_indices=torchdata.prepare_torch_data(input_sentences, input_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=False, shuffle=False, sort_batch=True)
 
 
 
@@ -84,11 +89,11 @@ def predict_eval(args):
         model.cuda()
     
     if args.evaluate:
-        acc=accuracy((data_batches_word, data_batches_char), model, torchdata.label_vectorizer, input_labels, args, input_sentences, args.verbose)
+        acc=accuracy((data_batches_word, data_batches_char, sequence_lengths), model, torchdata.label_vectorizer, list(np.array(input_labels)[sorting_indices]), args, list(np.array(input_sentences)[sorting_indices]), args.verbose)
         print("ACCURACY:",acc)
         
     else:
-        predict((data_batches_word, data_batches_char), model, torchdata.label_vectorizer, conllu_sentences)
+        predict((data_batches_word, data_batches_char, sequence_lengths), model, torchdata.label_vectorizer, conllu_sentences, sorting_indices, unsorting_indices, args)
 
 
 
