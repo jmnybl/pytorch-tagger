@@ -8,7 +8,7 @@ from text_classifier_torch.t2i import to_torch_long_tensor,torch_minibatched_2di
 WARNING='\033[91m'
 END_WARNING='\033[0m'
 
-ID,FORM,LEMMA,UPOS,POS,FEAT,HEAD,DEPREL,DEPS,MISC=range(10)
+ID,FORM,LEMMA,UPOS,XPOS,FEAT,HEAD,DEPREL,DEPS,MISC=range(10)
 class POSdata(object):
 
     def __init__(self):
@@ -42,6 +42,64 @@ class POSdata(object):
         for comm, sent in self.conllu_reader(open(filename,"rt",encoding="utf-8")):
             sentences.append(["<START>"]+[t[FORM] for t in sent]+["<END>"])
             labels.append(["<START>"]+[t[UPOS] for t in sent]+["<END>"])
+            if count_words:
+                for word in sentences[-1]:
+                    self.word_counts[word]=self.word_counts.get(word,0)+1
+            if len(sentences)>=max_sent:
+                break
+        return sentences,labels
+
+
+    def mask_rare_words(self, sentences, freq=5, mask_term="__UNK__",verbose=False):
+        if self.word_counts==None:
+            print(WARNING, "Warning! Cannot mask because we don't have word_counts. Use count_words=True when reading data.", END_WARNING, file=sys.stderr)
+            return
+        masked_sentences=[]
+        for sent in sentences:
+            new_sent=[]
+            for word in sent:
+                if self.word_counts.get(word,0)<freq:
+                    if verbose:
+                        print("Masking word",word,"with frequence",self.word_counts.get(word,0))
+                    new_sent.append(mask_term)
+                else:
+                    new_sent.append(word)
+            masked_sentences.append(sent)
+        return masked_sentences
+
+class MorphoData(object):
+
+    def __init__(self):
+        self.word_counts=None
+        
+
+    def conllu_reader(self,f):
+        sent=[]
+        comment=[]
+        for line in f:
+            line=line.strip()
+            if not line: # new sentence
+                if sent:
+                    yield comment,sent
+                comment=[]
+                sent=[]
+            elif line.startswith("#"):
+                comment.append(line)
+            else: #normal line
+                sent.append(line.split("\t"))
+        else:
+            if sent:
+                yield comment, sent
+
+
+    def read_data(self, filename, max_sent, count_words=True):
+        sentences=[]
+        labels=[]
+        if count_words:
+            self.word_counts={}
+        for comm, sent in self.conllu_reader(open(filename,"rt",encoding="utf-8")):
+            sentences.append(["<START>"]+[t[FORM] for t in sent]+["<END>"])
+            labels.append(["<START>"]+[t[UPOS]+"|"+t[XPOS]+"|"+t[FEAT] for t in sent]+["<END>"])
             if count_words:
                 for word in sentences[-1]:
                     self.word_counts[word]=self.word_counts.get(word,0)+1

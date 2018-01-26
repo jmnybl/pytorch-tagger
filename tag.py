@@ -27,7 +27,7 @@ END_WARNING='\033[0m'
 #        text_labels.append(max_labels)
 #    return text_labels
 
-ID,FORM,LEMMA,UPOS,POS,FEAT,HEAD,DEPREL,DEPS,MISC=range(10)
+ID,FORM,LEMMA,UPOS,XPOS,FEAT,HEAD,DEPREL,DEPS,MISC=range(10)
 #def predict(data,model,label_vectorizer,targets,args,sentences,verbose=False):
 def predict(input_data, model, label_vectorizer, conllu_sentences, sorting, unsorting, args):
     _word_in,_char_in,_lens=input_data
@@ -52,8 +52,11 @@ def predict(input_data, model, label_vectorizer, conllu_sentences, sorting, unso
             for i, token in enumerate(conllu):
                 ptoken=psent[i+1] # remove start marker to keep aligned
                 if ptoken=="<START>" or ptoken=="<END>" or ptoken=="__PADDING__":
-                    ptoken="_"
-                token[UPOS]=ptoken
+                    upos,feat="_","_"
+                upos,xpos,feat=ptoken.split("|",2)
+                token[UPOS]=upos
+                token[XPOS]=xpos
+                token[FEAT]=feat
                 sentence.append(token)
             predicted_conllu.append((comm,sentence))
     unsorted_conllu=list(np.array(predicted_conllu)[unsorting])

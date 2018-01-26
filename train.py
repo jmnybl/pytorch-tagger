@@ -8,7 +8,7 @@ import torch.optim as optim
 import numpy as np
 import pickle
 
-from data import POSdata, TorchData
+from data import POSdata, MorphoData, TorchData
 from models import SequenceTagger
 
 from text_classifier_torch.t2i import T2I as text_vectorizer
@@ -70,9 +70,11 @@ def minibatched_3dim(data,batch_size):
 def train(args):
 
     # data
-    posdata=POSdata() # class to read part-of-speech tagging data from conllu
-    train_sentences,train_labels=posdata.read_data(args.train_file, args.max_train, count_words=False)
+#    posdata=POSdata() # class to read part-of-speech tagging data from conllu
+    data_reader=MorphoData() # class to read part-of-speech tagging data from conllu
+    train_sentences,train_labels=data_reader.read_data(args.train_file, args.max_train, count_words=False)
 #    train_sentences=posdata.mask_rare_words(train_sentences, freq=args.word_freq_cutoff, mask_term="__UNK__", verbose=args.verbose)
+    print("First training example:", train_sentences[0], train_labels[0])
 
     torchdata=TorchData() # class to turn text into torch style minibatches
     if len(args.pretrained_word_embeddings)>0:
@@ -111,7 +113,7 @@ def train(args):
     print("Shuffling training data:",args.shuffle_train)
 
     # devel data
-    devel_sentences,devel_labels=posdata.read_data(args.devel_file,args.max_devel)
+    devel_sentences,devel_labels=data_reader.read_data(args.devel_file,args.max_devel)
 
     devel_batches_word, devel_batches_char, devel_batches_label, devel_sequence_lengths, devel_sorting_indices, devel_unsorting_indices=torchdata.prepare_torch_data(devel_sentences, devel_labels, args.batch_size, args.max_seq_len, args.max_seq_len_char, train=False, shuffle=False, sort_batch=True)
     devel_sentences_sorted=list(np.array(devel_sentences)[devel_sorting_indices])
